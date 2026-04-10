@@ -249,11 +249,20 @@
 
     .chat-header .title { flex: 1; font-size: 16px; font-weight: 600; }
 
-    .chat-header .user-info {
+    .chat-header .clear-btn {
+      background: rgba(255,255,255,0.15);
+      border: none;
+      color: white;
+      padding: 6px 12px;
+      border-radius: 6px;
       font-size: 12px;
-      opacity: 0.8;
-      margin-right: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+      width: auto;
+      margin-right: 6px;
     }
+
+    .chat-header .clear-btn:hover { background: rgba(255,255,255,0.3); }
 
     .chat-header .logout-btn {
       background: rgba(255,255,255,0.15);
@@ -278,7 +287,7 @@
       gap: 16px;
     }
 
-    .message { display: flex; flex-direction: column; max-width: 80%; }
+    .message { display: flex; flex-direction: column; max-width: 85%; }
     .message.user  { align-self: flex-end;  align-items: flex-end; }
     .message.bot   { align-self: flex-start; align-items: flex-start; }
 
@@ -305,6 +314,79 @@
     .label { font-size: 11px; color: #9ca3af; margin-bottom: 4px; padding: 0 4px; }
 
     .typing .bubble { background: #f3f4f6; color: #6b7280; font-style: italic; }
+
+    /* ── Token usage bar ───────────────────────────────────────── */
+    /* CONCEPT: Shows cache_read_input_tokens (green = cheap), cache_creation
+       (blue = first write), input_tokens (gray = uncached), output_tokens
+       (orange = generated). Helps visualise the cost impact of caching. */
+    .usage-bar {
+      margin-top: 6px;
+      padding: 6px 10px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      font-size: 11px;
+      color: #6b7280;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .usage-bar .badge {
+      padding: 2px 7px;
+      border-radius: 99px;
+      font-weight: 600;
+      font-size: 10px;
+    }
+
+    .badge-cached    { background: #d1fae5; color: #065f46; }
+    .badge-written   { background: #dbeafe; color: #1e40af; }
+    .badge-input     { background: #f3f4f6; color: #374151; }
+    .badge-output    { background: #fef3c7; color: #92400e; }
+    .badge-model     { background: #ede9fe; color: #5b21b6; }
+
+    /* ── Thinking block (collapsible) ──────────────────────────── */
+    /* CONCEPT: claude-opus-4-6 with adaptive thinking emits <thinking> blocks
+       before its final answer. We show them collapsed by default so users can
+       inspect the model's reasoning without cluttering the chat. */
+    .thinking-block {
+      margin-top: 6px;
+      border: 1px solid #e0d9ff;
+      border-radius: 8px;
+      background: #faf8ff;
+      font-size: 12px;
+      overflow: hidden;
+      max-width: 100%;
+    }
+
+    .thinking-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 12px;
+      cursor: pointer;
+      color: #7c3aed;
+      font-weight: 600;
+      user-select: none;
+      background: #f3f0ff;
+    }
+
+    .thinking-toggle .arrow { transition: transform 0.2s; }
+    .thinking-block.open .thinking-toggle .arrow { transform: rotate(90deg); }
+
+    .thinking-content {
+      display: none;
+      padding: 10px 12px;
+      color: #4b5563;
+      white-space: pre-wrap;
+      line-height: 1.5;
+      max-height: 300px;
+      overflow-y: auto;
+      border-top: 1px solid #e0d9ff;
+    }
+
+    .thinking-block.open .thinking-content { display: block; }
 
     .suggestions {
       padding: 0 24px 16px;
@@ -392,8 +474,10 @@
     .agent-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .agent-btn.monitor  { border-color: #6b7280; color: #6b7280; }
     .agent-btn.monitor:hover { background: #6b7280; color: white; }
+    .agent-btn.deep     { border-color: #7c3aed; color: #7c3aed; }
+    .agent-btn.deep:hover { background: #7c3aed; color: white; }
 
-    /* ── Investigate modal ─────────────────────────────────────── */
+    /* ── Modals ────────────────────────────────────────────────── */
     .modal-overlay {
       position: fixed; inset: 0;
       background: rgba(0,0,0,0.4);
@@ -402,10 +486,13 @@
     }
     .modal-box {
       background: white; border-radius: 14px;
-      padding: 28px; width: 340px;
+      padding: 28px; width: 360px;
       box-shadow: 0 8px 32px rgba(0,0,0,0.2);
     }
     .modal-box h3 { font-size: 16px; margin-bottom: 12px; color: #111; }
+    .modal-box .modal-desc {
+      font-size: 12px; color: #6b7280; margin-bottom: 12px; line-height: 1.5;
+    }
     .modal-box input {
       width: 100%; padding: 10px 12px;
       border: 1px solid #d1d5db; border-radius: 8px;
@@ -417,6 +504,8 @@
       font-size: 14px; font-weight: 600; cursor: pointer; border: none; width: auto; }
     .modal-confirm { background: #0070d2; color: white; }
     .modal-confirm:hover { background: #005fb2; }
+    .modal-confirm.deep-confirm { background: #7c3aed; }
+    .modal-confirm.deep-confirm:hover { background: #6d28d9; }
     .modal-cancel  { background: #f3f4f6; color: #374151; }
     .modal-cancel:hover { background: #e5e7eb; }
   </style>
@@ -489,13 +578,16 @@
   <div class="chat-header">
     <div class="status-dot"></div>
     <div class="title">Salesforce AI Assistant</div>
+    <button class="clear-btn" onclick="clearChat()" title="Clear conversation history">🗑 Clear</button>
     <button class="logout-btn" onclick="logout()">Disconnect</button>
   </div>
 
   <div class="messages" id="messages">
     <div class="message bot">
       <div class="label">Assistant</div>
-      <div class="bubble">Hi! I'm connected to your Salesforce org. Ask me anything about your accounts, contacts, opportunities, or cases.</div>
+      <div class="bubble">Hi! I'm connected to your Salesforce org. Ask me anything about your accounts, contacts, opportunities, or cases.
+
+Try the agent buttons below for deeper analysis.</div>
     </div>
   </div>
 
@@ -517,6 +609,9 @@
     <button class="agent-btn" id="btnReport" onclick="openReportModal()">
       🤖 AI Report
     </button>
+    <button class="agent-btn deep" id="btnAnalyze" onclick="openAnalyzeModal()">
+      🧠 Deep Analyze
+    </button>
     <button class="agent-btn monitor" onclick="showMonitorStatus()">
       📡 Monitor Status
     </button>
@@ -533,7 +628,7 @@
 <div id="reportModal" class="modal-overlay" style="display:none">
   <div class="modal-box">
     <h3>🤖 AI Report — Multi-Agent</h3>
-    <p style="font-size:12px;color:#6b7280;margin-bottom:12px;">
+    <p class="modal-desc">
       Coordinator picks which analysts to run. Analysts query Salesforce in parallel.
       Synthesis agent writes the final report.
     </p>
@@ -550,10 +645,29 @@
 <div id="investigateModal" class="modal-overlay" style="display:none">
   <div class="modal-box">
     <h3>🔍 Investigate a Deal</h3>
+    <p class="modal-desc">Runs a multi-hop agent: finds the opportunity, then pulls account details, contacts, and open cases.</p>
     <input type="text" id="companyInput" placeholder="e.g. Acme Corp, Edge, Grand Hotels" />
     <div class="modal-actions">
       <button class="modal-cancel"  onclick="closeInvestigateModal()">Cancel</button>
       <button class="modal-confirm" onclick="runInvestigate()">Investigate</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Deep Analyze modal ─────────────────────────────────────────── -->
+<div id="analyzeModal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3>🧠 Deep Analyze — Opus + Thinking</h3>
+    <p class="modal-desc">
+      Uses <strong>claude-opus-4-6</strong> with <strong>adaptive thinking</strong> enabled.
+      The model reasons step-by-step before answering — you'll see its thinking process
+      as a collapsible block. Token usage is shown after the response.
+    </p>
+    <input type="text" id="analyzeQuestion"
+           placeholder="e.g. Why are we losing enterprise deals? / Forecast risks this quarter" />
+    <div class="modal-actions">
+      <button class="modal-cancel"  onclick="closeAnalyzeModal()">Cancel</button>
+      <button class="modal-confirm deep-confirm" onclick="runAnalyze()">Analyze</button>
     </div>
   </div>
 </div>
@@ -567,7 +681,6 @@
 
   // ── On load: check auth status and show correct screen ──────────
   async function init() {
-    // Show error from OAuth redirect if present
     const params = new URLSearchParams(window.location.search);
     const oauthError = params.get("error");
 
@@ -625,7 +738,6 @@
     }
   }
 
-  // Allow Enter key to submit the API key form
   document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("api-key-input").addEventListener("keydown", e => {
       if (e.key === "Enter") saveApiKey();
@@ -638,7 +750,18 @@
     window.location.href = "/";
   }
 
-  // ── Chat functions ──────────────────────────────────────────────
+  // ── Clear conversation ───────────────────────────────────────────
+  async function clearChat() {
+    await fetch("/chat/clear", { method: "POST" });
+    const messagesEl = document.getElementById("messages");
+    messagesEl.innerHTML = `
+      <div class="message bot">
+        <div class="label">Assistant</div>
+        <div class="bubble">Conversation cleared. How can I help you?</div>
+      </div>`;
+  }
+
+  // ── Chat DOM helpers ────────────────────────────────────────────
   const messagesEl = document.getElementById("messages");
   const inputEl    = document.getElementById("input");
   const sendBtn    = document.getElementById("sendBtn");
@@ -698,6 +821,56 @@
     if (el) el.remove();
   }
 
+  // ── Usage bar ────────────────────────────────────────────────────
+  // CONCEPT: Visualises prompt caching impact.
+  // cache_read > 0 → system prompt was served from cache (green = cheap)
+  // cache_creation > 0 → cache written for the first time (blue)
+  // input_tokens → fresh (uncached) input tokens (gray)
+  // output_tokens → generated tokens (yellow = most expensive)
+  function addUsageBar(wrapper, usage) {
+    const bar = document.createElement("div");
+    bar.className = "usage-bar";
+
+    const parts = [];
+    if (usage.cache_read > 0)
+      parts.push(`<span class="badge badge-cached">⚡ ${usage.cache_read.toLocaleString()} cached</span>`);
+    if (usage.cache_creation > 0)
+      parts.push(`<span class="badge badge-written">💾 ${usage.cache_creation.toLocaleString()} cache write</span>`);
+    if (usage.input_tokens > 0)
+      parts.push(`<span class="badge badge-input">↑ ${usage.input_tokens.toLocaleString()} input</span>`);
+    if (usage.output_tokens > 0)
+      parts.push(`<span class="badge badge-output">↓ ${usage.output_tokens.toLocaleString()} output</span>`);
+    if (usage.model)
+      parts.push(`<span class="badge badge-model">${usage.model}</span>`);
+
+    bar.innerHTML = parts.join("");
+    wrapper.appendChild(bar);
+  }
+
+  // ── Thinking block ────────────────────────────────────────────────
+  // CONCEPT: claude-opus-4-6 with adaptive thinking emits thinking blocks.
+  // We show them as a collapsible section so users can inspect Claude's
+  // reasoning without it dominating the chat.
+  function addThinkingBlock(wrapper, thinkingText) {
+    const block = document.createElement("div");
+    block.className = "thinking-block";
+
+    const toggle = document.createElement("div");
+    toggle.className = "thinking-toggle";
+    toggle.innerHTML = `<span class="arrow">▶</span> <span>Claude's thinking</span>
+      <span style="margin-left:auto;font-size:10px;opacity:0.6;">${thinkingText.length.toLocaleString()} chars</span>`;
+    toggle.onclick = () => block.classList.toggle("open");
+
+    const content = document.createElement("div");
+    content.className = "thinking-content";
+    content.textContent = thinkingText;
+
+    block.appendChild(toggle);
+    block.appendChild(content);
+    wrapper.appendChild(block);
+  }
+
+  // ── /chat SSE handler ────────────────────────────────────────────
   async function sendMessage() {
     const text = inputEl.value.trim();
     if (!text) return;
@@ -727,7 +900,7 @@
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
-        buffer = lines.pop(); // keep incomplete line
+        buffer = lines.pop();
 
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
@@ -742,14 +915,10 @@
             if (typingEl) typingEl.querySelector(".bubble").textContent = `Using tool: ${msg.name}…`;
 
           } else if (msg.type === "stage") {
-            // Multi-agent progress: coordinator / analyst / synthesis steps
             const typingEl = document.getElementById("typing");
-            if (typingEl) {
-              typingEl.querySelector(".bubble").textContent = msg.label;
-            }
+            if (typingEl) typingEl.querySelector(".bubble").textContent = msg.label;
 
           } else if (msg.type === "text") {
-            // First chunk — replace typing indicator with real bubble
             if (!botWrapper) {
               removeTyping();
               botWrapper = document.createElement("div");
@@ -765,6 +934,10 @@
             }
             bubble.textContent += msg.chunk;
             messagesEl.scrollTop = messagesEl.scrollHeight;
+
+          } else if (msg.type === "usage") {
+            // Append usage bar below the assistant message
+            if (botWrapper) addUsageBar(botWrapper, msg);
 
           } else if (msg.type === "error") {
             removeTyping();
@@ -787,10 +960,9 @@
     inputEl.focus();
   }
 
-  // ── Shared SSE stream renderer ──────────────────────────────────
-  // Handles: tool, text, error  (existing agents)
-  //          stage              (multi-agent — shows coordinator/analyst/synthesis progress)
-  async function streamAgentResponse(fetchPromise, label) {
+  // ── Shared agent SSE renderer ────────────────────────────────────
+  // Handles: tool, stage, text, thinking, usage, error
+  async function streamAgentResponse(fetchPromise, label, agentLabel = "Agent") {
     const agentBtns = document.querySelectorAll(".agent-btn");
     agentBtns.forEach(b => b.disabled = true);
     sendBtn.disabled = true;
@@ -803,6 +975,7 @@
       const reader = res.body.getReader();
       const dec    = new TextDecoder();
       let botWrapper = null, bubble = null, buf = "";
+      let pendingThinking = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -820,20 +993,37 @@
           if (msg.type === "tool") {
             const t = document.getElementById("typing");
             if (t) t.querySelector(".bubble").textContent = `Running: ${msg.name}…`;
+
+          } else if (msg.type === "stage") {
+            const t = document.getElementById("typing");
+            if (t) t.querySelector(".bubble").textContent = msg.label;
+
+          } else if (msg.type === "thinking") {
+            // Accumulate thinking text; render once text starts
+            pendingThinking.push(msg.text);
+
           } else if (msg.type === "text") {
             if (!botWrapper) {
               removeTyping();
               botWrapper = document.createElement("div");
               botWrapper.className = "message bot";
               const lbl = document.createElement("div");
-              lbl.className = "label"; lbl.textContent = "Agent";
+              lbl.className = "label"; lbl.textContent = agentLabel;
               bubble = document.createElement("div");
               bubble.className = "bubble";
-              botWrapper.appendChild(lbl); botWrapper.appendChild(bubble);
+              botWrapper.appendChild(lbl);
+              // Render any accumulated thinking blocks before the answer
+              pendingThinking.forEach(t => addThinkingBlock(botWrapper, t));
+              pendingThinking = [];
+              botWrapper.appendChild(bubble);
               messagesEl.appendChild(botWrapper);
             }
             bubble.textContent += msg.chunk;
             messagesEl.scrollTop = messagesEl.scrollHeight;
+
+          } else if (msg.type === "usage") {
+            if (botWrapper) addUsageBar(botWrapper, msg);
+
           } else if (msg.type === "error") {
             removeTyping();
             addMessage("bot", "Error: " + msg.message);
@@ -878,11 +1068,12 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ company }),
       }),
-      `🔍 Investigate: ${company}`
+      `🔍 Investigate: ${company}`,
+      "Deal Investigator"
     );
   }
 
-  // ── AI Report: Multi-Agent (coordinator → analysts → synthesis) ──
+  // ── AI Report: Multi-Agent ───────────────────────────────────────
   function openReportModal() {
     document.getElementById("reportModal").style.display = "flex";
     setTimeout(() => document.getElementById("reportQuestion").focus(), 50);
@@ -910,15 +1101,50 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question }),
       }),
-      `🤖 AI Report: ${question}`
+      `🤖 AI Report: ${question}`,
+      "Multi-Agent Report"
     );
   }
 
-  // ── Agent 3: Business Review (subagents) ─────────────────────────
+  // ── Agent 3: Business Review ─────────────────────────────────────
   async function runBusinessReview() {
     await streamAgentResponse(
       fetch("/agent/review", { method: "POST" }),
-      "📊 Run Business Review"
+      "📊 Run Business Review",
+      "Business Review"
+    );
+  }
+
+  // ── Deep Analyze (Opus + Adaptive Thinking) ──────────────────────
+  function openAnalyzeModal() {
+    document.getElementById("analyzeModal").style.display = "flex";
+    setTimeout(() => document.getElementById("analyzeQuestion").focus(), 50);
+  }
+
+  function closeAnalyzeModal() {
+    document.getElementById("analyzeModal").style.display = "none";
+    document.getElementById("analyzeQuestion").value = "";
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("analyzeQuestion").addEventListener("keydown", e => {
+      if (e.key === "Enter") runAnalyze();
+      if (e.key === "Escape") closeAnalyzeModal();
+    });
+  });
+
+  async function runAnalyze() {
+    const question = document.getElementById("analyzeQuestion").value.trim();
+    if (!question) return;
+    closeAnalyzeModal();
+    await streamAgentResponse(
+      fetch("/agent/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      }),
+      `🧠 Deep Analyze: ${question}`,
+      "Deep Analyst (Opus)"
     );
   }
 

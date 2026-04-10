@@ -234,22 +234,25 @@ class ChatRequest(BaseModel):
     message: str
 
 
-@app.post("/chat")
-async def chat(req: ChatRequest, request: Request):
-    session = get_session(request)
-
-    if not session or not session.get("sf_token"):
-        return JSONResponse({"reply": "You are not connected to Salesforce. Please log in first."})
-    if not session.get("anthropic_key"):
-        return JSONResponse({"reply": "No Anthropic API key set. Please enter your API key first."})
-
-    sf_token        = session["sf_token"]
-    sf_instance_url = session["sf_instance_url"]
-    claude          = anthropic.Anthropic(api_key=session["anthropic_key"])
-
-    mcp_url = f"{MCP_SERVER_URL}?sf_token={sf_token}&sf_instance={sf_instance_url}"
-
-    system_prompt = """You are a Salesforce AI assistant with web search capability.
+# ---------------------------------------------------------------------------
+# System prompt as a cached content block.
+#
+# CONCEPT: Prompt Caching
+# By wrapping the system prompt in a list with cache_control, Claude caches
+# the processed prompt on Anthropic's servers for 5 minutes. Subsequent
+# requests that share the same prefix skip reprocessing it — you only pay
+# ~10% of the input token cost instead of 100%.
+#
+# The response.usage object then tells you:
+#   cache_creation_input_tokens → tokens written to cache (first call)
+#   cache_read_input_tokens     → tokens served from cache (subsequent calls)
+#   input_tokens                → uncached tokens (your new message)
+# ---------------------------------------------------------------------------
+_CHAT_SYSTEM = [
+    {
+        "type": "text",
+        "cache_control": {"type": "ephemeral"},   # ← prompt caching marker
+        "text": """You are a Salesforce AI assistant with web search capability.
 
 For Salesforce data questions, always use the run_soql tool to build a dynamic SOQL query.
 For current events, news, or any up-to-date information, use the web_search tool.
@@ -270,8 +273,29 @@ Common Salesforce objects and their key fields:
 - Lead: Id, FirstName, LastName, Email, Phone, Company, Status, Industry, LeadSource
 - Task: Id, Subject, Status, Priority, ActivityDate, WhoId, WhatId
 - User: Id, Name, Email, Title, Department, IsActive
-- Organization: Id, Name, OrganizationType, IsSandbox
-"""
+- Organization: Id, Name, OrganizationType, IsSandbox"""
+    }
+]
+
+
+@app.post("/chat")
+async def chat(req: ChatRequest, request: Request):
+    session = get_session(request)
+
+    if not session or not session.get("sf_token"):
+        return JSONResponse({"reply": "You are not connected to Salesforce. Please log in first."})
+    if not session.get("anthropic_key"):
+        return JSONResponse({"reply": "No Anthropic API key set. Please enter your API key first."})
+
+    sf_token        = session["sf_token"]
+    sf_instance_url = session["sf_instance_url"]
+    claude          = anthropic.Anthropic(api_key=session["anthropic_key"])
+    mcp_url         = f"{MCP_SERVER_URL}?sf_token={sf_token}&sf_instance={sf_instance_url}"
+
+    # CONCEPT: Multi-turn conversation history
+    # We keep the last 40 messages (20 exchanges) in the session so Claude
+    # remembers context across requests. Each entry is {"role": ..., "content": ...}.
+    history = session.get("conversation_history", [])
 
     async def stream_response():
         try:
@@ -283,92 +307,87 @@ Common Salesforce objects and their key fields:
                         async with ClientSession(ws_read, ws_write) as ws_session:
                             await ws_session.initialize()
 
-                            # ── Step 1: Merge tools from both MCP servers ────
                             sf_tools_resp = await sf_session.list_tools()
                             ws_tools_resp = await ws_session.list_tools()
 
                             def to_tool_dict(t):
-                                return {
-                                    "name":         t.name,
-                                    "description":  t.description or "",
-                                    "input_schema": to_dict(t.inputSchema),
-                                }
+                                return {"name": t.name, "description": t.description or "", "input_schema": to_dict(t.inputSchema)}
 
-                            tools = (
-                                [to_tool_dict(t) for t in sf_tools_resp.tools] +
-                                [to_tool_dict(t) for t in ws_tools_resp.tools]
-                            )
-
+                            tools         = [to_tool_dict(t) for t in sf_tools_resp.tools] + [to_tool_dict(t) for t in ws_tools_resp.tools]
                             sf_tool_names = {t.name for t in sf_tools_resp.tools}
                             ws_tool_names = {t.name for t in ws_tools_resp.tools}
 
-                            messages = [{"role": "user", "content": req.message}]
+                            # History + new message
+                            messages = history + [{"role": "user", "content": req.message}]
+
+                            # Track token usage across every API call in this request
+                            usage = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_creation": 0}
+
+                            def _add_usage(u):
+                                usage["input_tokens"]   += u.input_tokens
+                                usage["output_tokens"]  += u.output_tokens
+                                usage["cache_read"]     += getattr(u, "cache_read_input_tokens", 0)
+                                usage["cache_creation"] += getattr(u, "cache_creation_input_tokens", 0)
 
                             try:
-                                # ── Tool call loop (non-streaming) ───────────
+                                # ── Tool call loop ───────────────────────────
                                 while True:
                                     response = claude.messages.create(
                                         model="claude-sonnet-4-6",
                                         max_tokens=1024,
-                                        system=system_prompt,
+                                        system=_CHAT_SYSTEM,   # ← cached system prompt
                                         tools=tools,
                                         messages=messages,
                                     )
+                                    _add_usage(response.usage)
 
                                     if response.stop_reason != "tool_use":
                                         break
 
-                                    tool_blocks = [b for b in response.content if b.type == "tool_use"]
+                                    tool_blocks  = [b for b in response.content if b.type == "tool_use"]
                                     tool_results = []
 
                                     for tool_block in tool_blocks:
                                         yield f"data: {json.dumps({'type': 'tool', 'name': tool_block.name})}\n\n"
 
-                                        if tool_block.name in sf_tool_names:
-                                            mcp_sess = sf_session
-                                        elif tool_block.name in ws_tool_names:
-                                            mcp_sess = ws_session
-                                        else:
-                                            tool_results.append({
-                                                "type":        "tool_result",
-                                                "tool_use_id": tool_block.id,
-                                                "content":     f"Unknown tool: {tool_block.name}",
-                                            })
+                                        mcp_sess = sf_session if tool_block.name in sf_tool_names else (ws_session if tool_block.name in ws_tool_names else None)
+                                        if mcp_sess is None:
+                                            tool_results.append({"type": "tool_result", "tool_use_id": tool_block.id, "content": f"Unknown tool: {tool_block.name}"})
                                             continue
 
-                                        tool_result = await mcp_sess.call_tool(
-                                            tool_block.name,
-                                            dict(tool_block.input),
-                                        )
-                                        result_text = (
-                                            tool_result.content[0].text
-                                            if tool_result.content
-                                            else "No data returned."
-                                        )
-                                        tool_results.append({
-                                            "type":        "tool_result",
-                                            "tool_use_id": tool_block.id,
-                                            "content":     result_text,
-                                        })
+                                        tool_result = await mcp_sess.call_tool(tool_block.name, dict(tool_block.input))
+                                        result_text = tool_result.content[0].text if tool_result.content else "No data returned."
+                                        tool_results.append({"type": "tool_result", "tool_use_id": tool_block.id, "content": result_text})
 
-                                    assistant_content = [
-                                        to_dict(b) if not isinstance(b, dict) else b
-                                        for b in response.content
-                                    ]
-                                    messages.append({"role": "assistant", "content": assistant_content})
+                                    messages.append({"role": "assistant", "content": [to_dict(b) for b in response.content]})
                                     messages.append({"role": "user", "content": tool_results})
 
-                                # ── Step 2: Stream final text response ───────
+                                # ── Stream final response ────────────────────
+                                full_text = ""
                                 with claude.messages.stream(
                                     model="claude-sonnet-4-6",
                                     max_tokens=1024,
-                                    system=system_prompt,
+                                    system=_CHAT_SYSTEM,
                                     tools=tools,
                                     messages=messages,
                                 ) as stream:
-                                    for text_chunk in stream.text_stream:
-                                        yield f"data: {json.dumps({'type': 'text', 'chunk': text_chunk})}\n\n"
+                                    for chunk in stream.text_stream:
+                                        full_text += chunk
+                                        yield f"data: {json.dumps({'type': 'text', 'chunk': chunk})}\n\n"
+                                    _add_usage(stream.get_final_message().usage)
 
+                                # ── Save conversation history ────────────────
+                                updated = history + [
+                                    {"role": "user",      "content": req.message},
+                                    {"role": "assistant", "content": full_text},
+                                ]
+                                session["conversation_history"] = updated[-40:]  # keep last 20 exchanges
+
+                                # ── Emit token usage ─────────────────────────
+                                # CONCEPT: This is the usage object from the API.
+                                # cache_read > 0 means the system prompt was served from cache.
+                                # cache_creation > 0 means this call wrote it to cache.
+                                yield f"data: {json.dumps({'type': 'usage', **usage, 'model': 'claude-sonnet-4-6'})}\n\n"
                                 yield "data: [DONE]\n\n"
 
                             except anthropic.APIStatusError as e:
@@ -379,6 +398,18 @@ Common Salesforce objects and their key fields:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(stream_response(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Clear conversation history
+# ---------------------------------------------------------------------------
+
+@app.post("/chat/clear")
+async def clear_chat(request: Request):
+    session = get_session(request)
+    if session:
+        session["conversation_history"] = []
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +648,154 @@ End with a "Focus This Week" list of 3-5 concrete, prioritised actions."""
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(stream_response(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# /agent/analyze — Deep analysis using claude-opus-4-6 with adaptive thinking
+#
+# CONCEPT: Extended Thinking / Adaptive Thinking
+# claude-opus-4-6 supports thinking: {type: "adaptive"} which lets the model
+# decide *when* and *how much* to think before responding. The model emits
+# thinking blocks (type=="thinking") BEFORE the final answer blocks.
+#
+# This is different from the /chat endpoint which uses claude-sonnet-4-6.
+# Use this when you want the model to reason deeply over complex Salesforce data
+# before producing an answer — e.g., "why are we losing deals in the enterprise tier?"
+# ---------------------------------------------------------------------------
+
+class AnalyzeRequest(BaseModel):
+    question: str
+
+
+@app.post("/agent/analyze")
+async def agent_analyze(req: AnalyzeRequest, request: Request):
+    session = get_session(request)
+    if not session or not session.get("sf_token"):
+        return JSONResponse({"error": "Not connected to Salesforce."}, status_code=401)
+    if not session.get("anthropic_key"):
+        return JSONResponse({"error": "No Anthropic API key set."}, status_code=401)
+
+    sf_token        = session["sf_token"]
+    sf_instance_url = session["sf_instance_url"]
+    claude          = anthropic.Anthropic(api_key=session["anthropic_key"])
+    mcp_url         = f"{MCP_SERVER_URL}?sf_token={sf_token}&sf_instance={sf_instance_url}"
+
+    analyze_system = """You are a senior Salesforce business analyst with deep expertise in revenue operations.
+
+You have access to live Salesforce data via SOQL tools. Use them freely to gather evidence before forming conclusions.
+
+Your job:
+1. Run the SOQL queries needed to fully understand the question
+2. Think carefully (you have extended thinking enabled — use it)
+3. Produce a structured, insight-driven analysis with evidence from the data
+
+Always reference specific numbers, deal names, and trends from the data. Avoid generic advice."""
+
+    async def stream():
+        try:
+            async with sse_client(url=mcp_url) as (read, write):
+                async with ClientSession(read, write) as mcp_session:
+                    await mcp_session.initialize()
+
+                    tools_resp = await mcp_session.list_tools()
+                    tools = [
+                        {
+                            "name":         t.name,
+                            "description":  t.description or "",
+                            "input_schema": to_dict(t.inputSchema),
+                        }
+                        for t in tools_resp.tools
+                    ]
+                    tool_names = {t.name for t in tools_resp.tools}
+
+                    messages = [{"role": "user", "content": req.question}]
+
+                    # Track usage
+                    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_creation": 0}
+
+                    def _add_usage(u):
+                        usage["input_tokens"]   += u.input_tokens
+                        usage["output_tokens"]  += u.output_tokens
+                        usage["cache_read"]     += getattr(u, "cache_read_input_tokens", 0)
+                        usage["cache_creation"] += getattr(u, "cache_creation_input_tokens", 0)
+
+                    try:
+                        # ── Tool-call loop with adaptive thinking ────────────
+                        # CONCEPT: betas=["interleaved-thinking-2025-05-14"] enables
+                        # thinking blocks between tool calls, not just at the end.
+                        while True:
+                            response = claude.messages.create(
+                                model="claude-opus-4-6",
+                                max_tokens=4096,
+                                thinking={"type": "adaptive"},
+                                system=analyze_system,
+                                tools=tools,
+                                messages=messages,
+                                betas=["interleaved-thinking-2025-05-14"],
+                            )
+                            _add_usage(response.usage)
+
+                            if response.stop_reason != "tool_use":
+                                # Emit any thinking blocks from final response
+                                for block in response.content:
+                                    if block.type == "thinking":
+                                        yield f"data: {json.dumps({'type': 'thinking', 'text': block.thinking})}\n\n"
+                                break
+
+                            tool_blocks  = [b for b in response.content if b.type == "tool_use"]
+                            tool_results = []
+
+                            # Emit thinking blocks that appeared before tool calls
+                            for block in response.content:
+                                if block.type == "thinking":
+                                    yield f"data: {json.dumps({'type': 'thinking', 'text': block.thinking})}\n\n"
+
+                            for tool_block in tool_blocks:
+                                yield f"data: {json.dumps({'type': 'tool', 'name': tool_block.name})}\n\n"
+
+                                if tool_block.name in tool_names:
+                                    result      = await mcp_session.call_tool(tool_block.name, dict(tool_block.input))
+                                    result_text = result.content[0].text if result.content else "No data."
+                                else:
+                                    result_text = f"Unknown tool: {tool_block.name}"
+
+                                tool_results.append({
+                                    "type":        "tool_result",
+                                    "tool_use_id": tool_block.id,
+                                    "content":     result_text,
+                                })
+
+                            messages.append({"role": "assistant", "content": [to_dict(b) for b in response.content]})
+                            messages.append({"role": "user", "content": tool_results})
+
+                        # ── Stream final text response ────────────────────────
+                        # After tool calls are done, stream the final answer.
+                        # We use messages.create (not stream) since thinking+streaming
+                        # requires the beta SDK. Instead we emit the final text in chunks
+                        # from the last response we already have.
+                        final_text = ""
+                        for block in response.content:
+                            if hasattr(block, "text"):
+                                final_text += block.text
+
+                        # Stream the final text word-by-word for UI effect
+                        words = final_text.split(" ")
+                        for i, word in enumerate(words):
+                            chunk = word + (" " if i < len(words) - 1 else "")
+                            yield f"data: {json.dumps({'type': 'text', 'chunk': chunk})}\n\n"
+
+                        # Emit usage
+                        yield f"data: {json.dumps({'type': 'usage', **usage, 'model': 'claude-opus-4-6'})}\n\n"
+                        yield "data: [DONE]\n\n"
+
+                    except anthropic.APIStatusError as e:
+                        yield f"data: {json.dumps({'type': 'error', 'message': friendly_api_error(e)})}\n\n"
+
+        except Exception as e:
+            print(traceback.format_exc())
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------------------
