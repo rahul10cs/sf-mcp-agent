@@ -25,6 +25,7 @@ from agents import (
     deal_investigator,
     business_review,
     start_monitor,
+    stop_monitor,
     monitor_state,
 )
 from multi_agent import run_report
@@ -37,9 +38,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.on_event("startup")
 async def startup():
-    # Start background monitor only if env-var SF credentials are present
-    if os.getenv("SF_CLIENT_ID") and os.getenv("SF_CLIENT_SECRET") and os.getenv("SF_INSTANCE_URL"):
-        start_monitor(interval_seconds=300)  # runs every 5 minutes
+    # Monitor starts later — triggered by /set-api-key once the user has logged in.
+    # Nothing to do here.
+    pass
 
 MCP_SERVER_URL        = os.getenv("MCP_SERVER_URL", "http://localhost:8000/sse")
 MCP_WEBSEARCH_URL     = os.getenv("MCP_WEBSEARCH_URL", "http://localhost:8001/sse")
@@ -210,6 +211,16 @@ async def set_api_key(req: ApiKeyRequest, request: Request):
         return JSONResponse({"error": "Please connect Salesforce first."}, status_code=401)
 
     session["anthropic_key"] = req.api_key.strip()
+
+    # Start the background monitor now that we have both Salesforce token and
+    # Anthropic key. start_monitor() is a no-op if already running.
+    start_monitor(
+        interval_seconds=300,
+        api_key=session["anthropic_key"],
+        sf_token=session["sf_token"],
+        sf_instance=session["sf_instance_url"],
+    )
+
     return {"ok": True}
 
 
@@ -222,6 +233,7 @@ async def logout(request: Request, response: Response):
     sid = request.cookies.get(SESSION_COOKIE)
     if sid:
         sessions.pop(sid, None)
+    stop_monitor()  # stops the background task
     response.delete_cookie(SESSION_COOKIE)
     return {"ok": True}
 

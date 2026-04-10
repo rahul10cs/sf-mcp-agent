@@ -150,6 +150,9 @@ monitor_state: dict = {
     "error":       None,
 }
 
+# Credentials set when start_monitor() is called
+_monitor_creds: dict = {}  # {api_key, sf_token, sf_instance}
+
 _MONITOR_SYSTEM = """You are an automated Salesforce pipeline monitor.
 Run exactly these three SOQL queries using run_soql, then return ONLY valid JSON.
 
@@ -169,8 +172,19 @@ Populate alerts with plain-English flags: stale deals, risky close dates, low-pi
 
 
 async def _monitor_once() -> dict:
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
-    async with sse_client(url=MCP_SERVER_URL) as (read, write):
+    api_key     = _monitor_creds.get("api_key") or os.getenv("ANTHROPIC_API_KEY")
+    sf_token    = _monitor_creds.get("sf_token")
+    sf_instance = _monitor_creds.get("sf_instance")
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    # Build MCP URL: with user token if available, else bare (env-var client creds)
+    if sf_token and sf_instance:
+        mcp_url = f"{MCP_SERVER_URL}?sf_token={sf_token}&sf_instance={sf_instance}"
+    else:
+        mcp_url = MCP_SERVER_URL
+
+    async with sse_client(url=mcp_url) as (read, write):
         async with ClientSession(read, write) as sess:
             await sess.initialize()
             tools, tool_names = await _load_mcp_tools(sess)
@@ -213,11 +227,17 @@ async def _monitor_loop(interval_seconds: int):
     monitor_state["running"] = False
 
 
-def start_monitor(interval_seconds: int = 300):
-    """Call from FastAPI startup. Safe to call multiple times."""
-    if not monitor_state["running"]:
-        monitor_state["running"] = True
-        asyncio.create_task(_monitor_loop(interval_seconds))
+def start_monitor(interval_seconds: int = 300, api_key: str = None,
+                  sf_token: str = None, sf_instance: str = None):
+    """Start the background monitor. Safe to call multiple times — ignores if already running."""
+    if monitor_state["running"]:
+        return
+    # Store credentials so _monitor_once can use them
+    _monitor_creds["api_key"]     = api_key
+    _monitor_creds["sf_token"]    = sf_token
+    _monitor_creds["sf_instance"] = sf_instance
+    monitor_state["running"] = True
+    asyncio.create_task(_monitor_loop(interval_seconds))
 
 
 def stop_monitor():
